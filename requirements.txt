@@ -1,0 +1,7 @@
+rembg
+Pillow
+onnxruntime
+pyinstaller
+numpy
+opencv-python-headless
+customtkinter
