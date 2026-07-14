@@ -13,4 +13,4 @@ if exist "%ICON_FILE%" (
 
 echo.
 echo Build complete. Check the dist folder for %APP_NAME%.exe
-pause
+if not defined CI pause
