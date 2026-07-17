@@ -1,12 +1,24 @@
 from io import BytesIO
 from collections import deque
+import os
+import sys
 
 import numpy as np
 from PIL import Image
 
+
+# pymatting enables Numba's on-disk cache while rembg is imported. In a
+# PyInstaller bundle Numba timestamps sys.executable as its cache source, which
+# crashes when Windows has moved or quarantined the one-file executable after
+# launch. PNG Factory does not use rembg's optional alpha-matting path, so JIT
+# compilation is unnecessary in the frozen application.
+if getattr(sys, "frozen", False):
+    os.environ["NUMBA_DISABLE_JIT"] = "1"
+
+
 try:
     from rembg import remove as rembg_remove
-except ModuleNotFoundError as exc:
+except (ImportError, OSError, SystemExit) as exc:
     rembg_remove = None
     IMPORT_ERROR = exc
 else:
@@ -15,8 +27,12 @@ else:
 
 def remove_background(input_bytes: bytes) -> bytes:
     if rembg_remove is None:
+        detail = f"{type(IMPORT_ERROR).__name__}: {IMPORT_ERROR}"
+        if isinstance(IMPORT_ERROR, ModuleNotFoundError) and IMPORT_ERROR.name:
+            detail = f"Missing module {IMPORT_ERROR.name!r}. {detail}"
         raise RuntimeError(
-            "Missing dependency: rembg. Run `py -m pip install -r requirements.txt` first."
+            "AI 去背元件載入失敗。請下載最新版本後再試。\n\n"
+            f"技術資訊：{detail}"
         ) from IMPORT_ERROR
 
     output_bytes = rembg_remove(input_bytes)
