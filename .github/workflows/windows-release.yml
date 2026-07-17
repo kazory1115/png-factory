@@ -32,6 +32,14 @@ jobs:
         env:
           CI: "1"
 
+      - name: Smoke test packaged AI engine
+        shell: pwsh
+        run: |
+          $process = Start-Process -FilePath ".\dist\PngFactory.exe" -ArgumentList "--smoke-test" -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "Packaged AI engine smoke test failed with exit code $($process.ExitCode)."
+          }
+
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
