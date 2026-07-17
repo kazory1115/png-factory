@@ -14,6 +14,12 @@ from PIL import Image
 # compilation is unnecessary in the frozen application.
 if getattr(sys, "frozen", False):
     os.environ["NUMBA_DISABLE_JIT"] = "1"
+    # Windowed bundles have no console streams, but rembg's model downloader
+    # writes progress through TQDM even when the application has no console.
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")
 
 
 try:
