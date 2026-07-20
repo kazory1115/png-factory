@@ -13,11 +13,10 @@ from PIL import Image, ImageOps, ImageTk
 
 from app.editor import CutoutEditor
 from app.file_service import build_default_output_path, ensure_supported_image
-from app.remover import remove_background
+from app.remover import prepare_model, remove_background
 
 
 APP_TITLE = "PNG Factory — 精修工作台"
-WINDOW_SIZE = "1180x760"
 BG = "#101417"
 PANEL = "#181e22"
 PANEL_ALT = "#20272c"
@@ -33,12 +32,168 @@ ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("green")
 
 
+class ExportOverlay(ctk.CTkFrame):
+    """An in-window export surface that never creates another OS window."""
+
+    def __init__(self, parent: ctk.CTk, default_path: Path, on_export) -> None:
+        super().__init__(parent, fg_color="#0b0f11", corner_radius=0)
+        self.on_export = on_export
+        self.path_value = tk.StringVar(value=str(default_path))
+        self.confirmed_overwrite: Path | None = None
+        self.export_complete = False
+        self.place(x=0, y=0, relwidth=1, relheight=1)
+        self.lift()
+        self.bind("<Escape>", lambda _event: self._close())
+        self.bind("<Return>", lambda _event: self._export())
+
+        card = ctk.CTkFrame(
+            self,
+            width=560,
+            height=330,
+            fg_color=PANEL,
+            corner_radius=18,
+            border_width=1,
+            border_color=CARD_BORDER,
+        )
+        card.place(relx=0.5, rely=0.5, anchor="center")
+        card.pack_propagate(False)
+        ctk.CTkLabel(
+            card,
+            text="EXPORT / PNG",
+            text_color=ACCENT,
+            font=("Consolas", 11, "bold"),
+        ).pack(anchor="w", padx=24, pady=(22, 3))
+        ctk.CTkLabel(
+            card,
+            text="匯出透明圖片",
+            text_color=TEXT,
+            font=("Microsoft JhengHei UI", 20, "bold"),
+        ).pack(anchor="w", padx=24)
+        ctk.CTkLabel(
+            card,
+            text="PNG 會保留目前畫布中的透明區域與精修結果。",
+            text_color=MUTED,
+            font=("Microsoft JhengHei UI", 11),
+        ).pack(anchor="w", padx=24, pady=(4, 18))
+
+        path_row = ctk.CTkFrame(card, fg_color="transparent")
+        path_row.pack(fill="x", padx=24)
+        self.path_entry = ctk.CTkEntry(
+            path_row,
+            textvariable=self.path_value,
+            height=42,
+            corner_radius=9,
+            fg_color="#11171a",
+            border_color="#354148",
+            text_color=TEXT,
+            font=("Microsoft JhengHei UI", 11),
+        )
+        self.path_entry.pack(side="left", fill="x", expand=True)
+        self.path_entry.bind("<Escape>", lambda _event: self._close())
+        self.path_entry.bind("<Return>", lambda _event: self._export())
+        self.folder_button = ctk.CTkButton(
+            path_row,
+            text="選擇資料夾",
+            width=104,
+            height=42,
+            command=self._choose_folder,
+            fg_color=PANEL_ALT,
+            hover_color="#303a40",
+            border_width=1,
+            border_color="#354148",
+            font=("Microsoft JhengHei UI", 11, "bold"),
+        )
+        self.folder_button.pack(side="left", padx=(8, 0))
+
+        self.feedback = ctk.CTkLabel(
+            card,
+            text="",
+            text_color=MUTED,
+            anchor="w",
+            font=("Microsoft JhengHei UI", 10),
+        )
+        self.feedback.pack(fill="x", padx=24, pady=(8, 0))
+
+        actions = ctk.CTkFrame(card, fg_color="transparent")
+        actions.pack(fill="x", padx=24, pady=(12, 20), side="bottom")
+        ctk.CTkButton(
+            actions,
+            text="取消",
+            width=92,
+            height=40,
+            command=self._close,
+            fg_color="transparent",
+            hover_color=PANEL_ALT,
+            border_width=1,
+            border_color="#354148",
+            font=("Microsoft JhengHei UI", 11, "bold"),
+        ).pack(side="left")
+        self.export_button = ctk.CTkButton(
+            actions,
+            text="匯出 PNG  →",
+            width=148,
+            height=40,
+            command=self._export,
+            fg_color=ACCENT,
+            hover_color="#70ecb7",
+            text_color="#08140f",
+            font=("Microsoft JhengHei UI", 12, "bold"),
+        )
+        self.export_button.pack(side="right")
+        self.after_idle(self.path_entry.focus_set)
+
+    def _close(self) -> None:
+        parent = self.master
+        self.destroy()
+        parent.after_idle(parent.focus_set)
+
+    def _choose_folder(self) -> None:
+        current = Path(self.path_value.get().strip() or ".")
+        folder = filedialog.askdirectory(
+            parent=self.winfo_toplevel(),
+            title="選擇輸出資料夾",
+            initialdir=str(current.parent),
+        )
+        if folder:
+            self.path_value.set(str(Path(folder) / current.name))
+
+    def _export(self) -> None:
+        if self.export_complete:
+            self._close()
+            return
+        raw_path = self.path_value.get().strip()
+        if not raw_path:
+            self.feedback.configure(text="請輸入檔名與儲存位置。", text_color=DANGER)
+            return
+        output_path = Path(raw_path)
+        if output_path.suffix.lower() != ".png":
+            output_path = output_path.with_suffix(".png")
+            self.path_value.set(str(output_path))
+        if output_path.exists() and self.confirmed_overwrite != output_path:
+            self.confirmed_overwrite = output_path
+            self.feedback.configure(
+                text="此檔案已存在。再次點擊即可確認覆蓋。", text_color="#f6c85f"
+            )
+            self.export_button.configure(text="確認覆蓋  →")
+            return
+        self.export_button.configure(state="disabled", text="正在匯出…")
+        error = self.on_export(output_path)
+        if error:
+            self.feedback.configure(text=error, text_color=DANGER)
+            self.export_button.configure(state="normal", text="重新匯出  →")
+            return
+        self.feedback.configure(text=f"✓ 已儲存至 {output_path.parent}", text_color=ACCENT)
+        self.export_complete = True
+        self.path_entry.configure(state="disabled")
+        self.folder_button.configure(state="disabled")
+        self.export_button.configure(state="normal", text="完成")
+
+
 class PngFactoryApp:
     def __init__(self, root: ctk.CTk) -> None:
         self.root = root
         self.root.title(APP_TITLE)
-        self.root.geometry(WINDOW_SIZE)
-        self.root.minsize(960, 640)
+        self._configure_window_size()
         self.root.configure(fg_color=BG)
 
         self.selected_file = tk.StringVar()
@@ -55,11 +210,31 @@ class PngFactoryApp:
         self.pan_start: tuple[int, int] | None = None
         self.last_paint_point: tuple[float, float] | None = None
         self.is_processing = False
+        self.is_model_loading = False
         self.has_auto_cutout = False
+        self.model_ready = False
+        self.model_error: Exception | None = None
+        self.export_dialog: ExportOverlay | None = None
 
         self._build_layout()
         self.root.bind("<Control-z>", lambda _event: self.undo())
         self.root.bind("<Control-s>", lambda _event: self.save_image())
+        self.root.after(180, self._start_model_loading)
+
+    def _configure_window_size(self) -> None:
+        """Fit the workspace to the current display and center it safely."""
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        available_width = max(760, screen_width - 80)
+        available_height = max(600, screen_height - 100)
+        width = min(1240, available_width)
+        height = min(800, available_height)
+        min_width = min(1000, width)
+        min_height = min(660, height)
+        self.root.minsize(min_width, min_height)
+        x = max(0, (screen_width - width) // 2)
+        y = max(0, (screen_height - height) // 2)
+        self.root.geometry(f"{width}x{height}+{x}+{y}")
 
     def _build_layout(self) -> None:
         header = ctk.CTkFrame(self.root, fg_color="transparent", height=72)
@@ -88,6 +263,30 @@ class PngFactoryApp:
             font=ctk.CTkFont(family="Microsoft JhengHei UI", size=12),
         ).pack(side="left", padx=(12, 0), pady=18)
 
+        model_card = ctk.CTkFrame(
+            header, fg_color=PANEL, corner_radius=10, border_width=1, border_color=CARD_BORDER
+        )
+        model_card.pack(side="right", pady=8)
+        self.model_status_label = ctk.CTkLabel(
+            model_card,
+            text="去背引擎準備中",
+            text_color=MUTED,
+            width=128,
+            anchor="w",
+            font=("Microsoft JhengHei UI", 10, "bold"),
+        )
+        self.model_status_label.pack(side="left", padx=(12, 8), pady=8)
+        self.model_progress = ctk.CTkProgressBar(
+            model_card,
+            width=112,
+            height=7,
+            mode="indeterminate",
+            fg_color="#2b3439",
+            progress_color=ACCENT,
+        )
+        self.model_progress.pack(side="left", padx=(0, 12))
+        self.model_progress.set(0)
+
         workspace = ctk.CTkFrame(self.root, fg_color="transparent")
         workspace.pack(fill="both", expand=True, padx=20, pady=(0, 14))
         workspace.grid_columnconfigure(1, weight=1)
@@ -104,27 +303,58 @@ class PngFactoryApp:
         ctk.CTkLabel(footer, text="CTRL + Z  復原     CTRL + S  儲存", text_color="#647279", font=("Consolas", 10)).pack(side="right", padx=22)
 
     def _build_left_panel(self, parent: ctk.CTkFrame) -> None:
-        panel = ctk.CTkFrame(parent, width=224, corner_radius=16, fg_color=PANEL, border_width=1, border_color=CARD_BORDER)
+        panel = ctk.CTkFrame(parent, width=232, corner_radius=16, fg_color=PANEL, border_width=1, border_color=CARD_BORDER)
         panel.grid(row=0, column=0, sticky="ns", padx=(0, 12))
         panel.grid_propagate(False)
-        content = ctk.CTkFrame(panel, fg_color="transparent")
-        content.pack(fill="both", expand=True, padx=18, pady=20)
+        panel.grid_columnconfigure(0, weight=1)
+        panel.grid_rowconfigure(0, weight=1)
+
+        content = ctk.CTkScrollableFrame(
+            panel,
+            fg_color="transparent",
+            corner_radius=0,
+            scrollbar_button_color="#354148",
+            scrollbar_button_hover_color="#46555d",
+        )
+        content.grid(row=0, column=0, sticky="nsew", padx=(14, 7), pady=(18, 8))
 
         self._section_label(content, "01", "來源圖片", "JPG · JPEG · PNG")
-        ctk.CTkButton(content, text="＋  選擇圖片", command=self.choose_file, height=42, corner_radius=10, fg_color=ACCENT, hover_color="#70ecb7", text_color="#08140f", font=("Microsoft JhengHei UI", 13, "bold")).pack(fill="x", pady=(12, 0))
+        self.choose_button = ctk.CTkButton(content, text="＋  選擇圖片", command=self.choose_file, height=42, corner_radius=10, fg_color=PANEL_ALT, hover_color="#303a40", border_width=1, border_color="#3b474d", text_color=TEXT, font=("Microsoft JhengHei UI", 13, "bold"))
+        self.choose_button.pack(fill="x", pady=(12, 0))
         self.file_label = ctk.CTkLabel(content, text="尚未選擇檔案", text_color=MUTED, anchor="w", justify="left", wraplength=178, font=("Microsoft JhengHei UI", 11))
         self.file_label.pack(fill="x", pady=(10, 22))
 
         self._divider(content)
         self._section_label(content, "02", "自動去背", "建立初始透明遮罩")
-        self.process_button = ctk.CTkButton(content, text="執行去背", command=self.process_image, height=40, corner_radius=10, fg_color=PANEL_ALT, hover_color="#303a40", border_width=1, border_color="#354148", font=("Microsoft JhengHei UI", 12, "bold"))
+        self.process_button = ctk.CTkButton(content, text="去背引擎準備中…", command=self.process_image, state="disabled", height=42, corner_radius=10, fg_color=ACCENT_DARK, hover_color="#245443", border_width=1, border_color="#28634f", text_color=ACCENT, font=("Microsoft JhengHei UI", 12, "bold"))
         self.process_button.pack(fill="x", pady=(12, 0))
 
-        ctk.CTkFrame(content, fg_color="transparent").pack(fill="both", expand=True)
-        self._divider(content)
-        self._section_label(content, "03", "輸出檔案", "透明 PNG")
-        self.save_button = ctk.CTkButton(content, text="儲存透明 PNG", command=self.save_image, state="disabled", height=42, corner_radius=10, fg_color=ACCENT, hover_color="#70ecb7", text_color="#08140f", font=("Microsoft JhengHei UI", 13, "bold"))
-        self.save_button.pack(fill="x", pady=(12, 0))
+        export_area = ctk.CTkFrame(
+            panel,
+            height=132,
+            corner_radius=0,
+            fg_color="#141a1d",
+            border_width=1,
+            border_color=CARD_BORDER,
+        )
+        export_area.grid(row=1, column=0, sticky="ew")
+        export_area.grid_propagate(False)
+        export_content = ctk.CTkFrame(export_area, fg_color="transparent")
+        export_content.pack(fill="both", expand=True, padx=18, pady=14)
+        self._section_label(export_content, "03", "輸出檔案", "透明 PNG")
+        self.save_button = ctk.CTkButton(
+            export_content,
+            text="匯出透明 PNG  →",
+            command=self.save_image,
+            state="disabled",
+            height=44,
+            corner_radius=10,
+            fg_color=ACCENT,
+            hover_color="#70ecb7",
+            text_color="#08140f",
+            font=("Microsoft JhengHei UI", 13, "bold"),
+        )
+        self.save_button.pack(fill="x", pady=(10, 0))
 
     def _section_label(self, parent: ctk.CTkFrame, number: str, title: str, subtitle: str) -> None:
         row = ctk.CTkFrame(parent, fg_color="transparent")
@@ -164,7 +394,7 @@ class PngFactoryApp:
         panel = ctk.CTkScrollableFrame(parent, width=234, corner_radius=16, fg_color=PANEL, border_width=1, border_color=CARD_BORDER, scrollbar_button_color="#354148", scrollbar_button_hover_color="#46555d")
         panel.grid(row=0, column=2, sticky="ns", padx=(12, 0))
         ctk.CTkLabel(panel, text="精修工具", text_color=TEXT, anchor="w", font=("Microsoft JhengHei UI", 16, "bold")).pack(fill="x", padx=4)
-        ctk.CTkLabel(panel, text="標記邊緣，讓模型理解你的需求", text_color=MUTED, anchor="w", font=("Microsoft JhengHei UI", 10)).pack(fill="x", padx=4, pady=(1, 15))
+        ctk.CTkLabel(panel, text="先修改遮罩，再重新分析主體邊界", text_color=MUTED, anchor="w", font=("Microsoft JhengHei UI", 10)).pack(fill="x", padx=4, pady=(1, 15))
 
         mode_card = ctk.CTkFrame(panel, fg_color=PANEL_ALT, corner_radius=12)
         mode_card.pack(fill="x", padx=4, pady=(0, 18))
@@ -194,11 +424,13 @@ class PngFactoryApp:
 
         secondary = {"height": 36, "corner_radius": 9, "fg_color": PANEL_ALT, "hover_color": "#303a40", "border_width": 1, "border_color": "#354148", "font": ("Microsoft JhengHei UI", 11)}
         ctk.CTkButton(panel, text="適合畫面", command=self.fit_to_canvas, **secondary).pack(fill="x", pady=(0, 7))
-        ctk.CTkButton(panel, text="↶  復原上一步", command=self.undo, **secondary).pack(fill="x", pady=(0, 7))
-        ctk.CTkButton(panel, text="重設自動遮罩", command=self.reset_mask, **secondary).pack(fill="x")
+        self.undo_button = ctk.CTkButton(panel, text="↶  復原上一步", command=self.undo, state="disabled", **secondary)
+        self.undo_button.pack(fill="x", pady=(0, 7))
+        self.reset_button = ctk.CTkButton(panel, text="重設自動遮罩", command=self.reset_mask, state="disabled", **secondary)
+        self.reset_button.pack(fill="x")
         self.refine_button = ctk.CTkButton(
             panel,
-            text="✦  智慧精修",
+            text="✦  依修改結果重新去背",
             command=self.smart_refine,
             state="disabled",
             height=42,
@@ -213,9 +445,54 @@ class PngFactoryApp:
         tip = ctk.CTkFrame(panel, fg_color="#141a1d", corner_radius=10, border_width=1, border_color=CARD_BORDER)
         tip.pack(fill="x", pady=(18, 4))
         ctk.CTkLabel(tip, text="PRO TIP", text_color=ACCENT, font=("Consolas", 10, "bold")).pack(anchor="w", padx=12, pady=(10, 2))
-        ctk.CTkLabel(tip, text="滾輪縮放；按住中鍵或右鍵移動畫布。柔邊筆刷適合頭髮與商品邊緣。", text_color=MUTED, wraplength=188, justify="left", font=("Microsoft JhengHei UI", 10)).pack(anchor="w", padx=12, pady=(0, 11))
+        ctk.CTkLabel(tip, text="筆刷修改目前結果；重新精修會把修改後的遮罩當作參考，不會強制保留筆刷區域。", text_color=MUTED, wraplength=188, justify="left", font=("Microsoft JhengHei UI", 10)).pack(anchor="w", padx=12, pady=(0, 11))
+
+    def _start_model_loading(self) -> None:
+        if self.is_model_loading or self.model_ready:
+            return
+        self.is_model_loading = True
+        self.model_error = None
+        self.process_button.configure(state="disabled", text="去背引擎準備中…")
+        self.model_status_label.configure(text="去背引擎載入中", text_color=ACCENT)
+        self.model_progress.configure(mode="indeterminate")
+        self.model_progress.start()
+        self.status_text.set("首次啟動可能需要下載去背資料，完成後即可離線使用。")
+        threading.Thread(target=self._model_worker, daemon=True).start()
+
+    def _model_worker(self) -> None:
+        try:
+            prepare_model()
+        except Exception as exc:
+            self.root.after(0, lambda error=exc: self._finish_model_loading(error))
+        else:
+            self.root.after(0, self._finish_model_loading, None)
+
+    def _finish_model_loading(self, error: Exception | None) -> None:
+        self.is_model_loading = False
+        self.model_progress.stop()
+        if error is not None:
+            self.model_error = error
+            self.model_status_label.configure(text="去背引擎載入失敗", text_color=DANGER)
+            self.model_progress.configure(mode="determinate", progress_color=DANGER)
+            self.model_progress.set(1)
+            self.process_button.configure(state="normal", text="重試載入去背引擎")
+            self.status_text.set("去背引擎載入失敗，請確認網路後點擊重試。")
+            return
+        self.model_ready = True
+        self.model_status_label.configure(text="去背引擎已就緒", text_color=ACCENT)
+        self.model_progress.configure(mode="determinate", progress_color=ACCENT)
+        self.model_progress.set(1)
+        self.process_button.configure(state="normal", text="開始自動去背  →")
+        self.status_text.set(
+            "去背引擎已就緒，可以開始處理。"
+            if self.selected_file.get()
+            else "去背引擎已就緒。選擇圖片開始處理。"
+        )
 
     def choose_file(self) -> None:
+        if self.is_processing:
+            messagebox.showwarning(APP_TITLE, "圖片仍在處理中，請稍候完成後再選擇圖片。")
+            return
         file_path = filedialog.askopenfilename(title="選擇圖片", filetypes=[("Image Files", "*.jpg *.jpeg *.png")])
         if not file_path:
             return
@@ -230,9 +507,15 @@ class PngFactoryApp:
 
         self.selected_file.set(file_path)
         self.file_label.configure(text=Path(file_path).name, text_color=TEXT)
-        self.status_text.set("圖片已載入，點擊「執行去背」。")
+        self.status_text.set(
+            "圖片已載入，點擊「開始自動去背」。"
+            if self.model_ready
+            else "圖片已載入，等待去背引擎準備完成。"
+        )
         self.save_button.configure(state="disabled")
         self.refine_button.configure(state="disabled")
+        self.undo_button.configure(state="disabled")
+        self.reset_button.configure(state="disabled")
         self.has_auto_cutout = False
         self.zoom_factor = 1.0
         self.pan_offset = [0, 0]
@@ -240,6 +523,9 @@ class PngFactoryApp:
 
     def process_image(self) -> None:
         if self.is_processing:
+            return
+        if not self.model_ready:
+            self._start_model_loading()
             return
         raw_path = self.selected_file.get().strip()
         if not raw_path:
@@ -259,8 +545,16 @@ class PngFactoryApp:
             return
 
         self.is_processing = True
-        self.process_button.configure(state="disabled", text="處理中…")
-        self.status_text.set("AI 正在建立遮罩，請稍候…")
+        self.choose_button.configure(state="disabled")
+        self.process_button.configure(state="disabled", text="自動去背中…")
+        self.save_button.configure(state="disabled")
+        self.refine_button.configure(state="disabled")
+        self.undo_button.configure(state="disabled")
+        self.reset_button.configure(state="disabled")
+        self.model_status_label.configure(text="正在分析圖片", text_color=ACCENT)
+        self.model_progress.configure(mode="indeterminate", progress_color=ACCENT)
+        self.model_progress.start()
+        self.status_text.set("正在分析圖片並建立透明遮罩，請稍候…")
         threading.Thread(target=self._process_worker, args=(input_bytes,), daemon=True).start()
 
     def _process_worker(self, input_bytes: bytes) -> None:
@@ -276,8 +570,18 @@ class PngFactoryApp:
 
     def _finish_processing(self, editor: CutoutEditor | None, error: Exception | None) -> None:
         self.is_processing = False
-        self.process_button.configure(state="normal", text="重新執行去背")
+        self.model_progress.stop()
+        self.model_progress.configure(mode="determinate", progress_color=ACCENT)
+        self.model_progress.set(1)
+        self.model_status_label.configure(text="去背引擎已就緒", text_color=ACCENT)
+        self.choose_button.configure(state="normal")
+        self.process_button.configure(state="normal", text="重新執行自動去背")
         if error is not None:
+            previous_state = "normal" if self.has_auto_cutout else "disabled"
+            self.save_button.configure(state=previous_state)
+            self.refine_button.configure(state=previous_state)
+            self.undo_button.configure(state=previous_state)
+            self.reset_button.configure(state=previous_state)
             self.status_text.set("去背失敗。")
             messagebox.showerror(APP_TITLE, str(error))
             return
@@ -285,6 +589,8 @@ class PngFactoryApp:
         self.has_auto_cutout = True
         self.save_button.configure(state="normal")
         self.refine_button.configure(state="normal")
+        self.undo_button.configure(state="normal")
+        self.reset_button.configure(state="normal")
         self.status_text.set("去背完成。使用右側筆刷精修透明遮罩。")
         self._draw_preview()
 
@@ -333,6 +639,8 @@ class PngFactoryApp:
         return None
 
     def _start_stroke(self, event: tk.Event) -> None:
+        if self.is_processing:
+            return
         point = self._canvas_to_image(event)
         if point is None or self.editor is None:
             return
@@ -350,6 +658,7 @@ class PngFactoryApp:
     def _end_stroke(self, _event: tk.Event) -> None:
         self.last_paint_point = None
         if self.editor is not None:
+            self.undo_button.configure(state="normal")
             self._draw_preview()
             self.status_text.set("遮罩已修改，記得儲存輸出。")
 
@@ -437,12 +746,14 @@ class PngFactoryApp:
         self.canvas.configure(cursor="crosshair")
 
     def undo(self) -> None:
+        if self.is_processing:
+            return
         if self.editor is not None and self.editor.undo():
             self._draw_preview()
             self.status_text.set("已復原上一步。")
 
     def reset_mask(self) -> None:
-        if self.editor is None or not self.has_auto_cutout:
+        if self.editor is None or not self.has_auto_cutout or self.is_processing:
             return
         self.editor.reset()
         self._draw_preview()
@@ -458,50 +769,75 @@ class PngFactoryApp:
             )
             return
         self.is_processing = True
-        self.refine_button.configure(state="disabled", text="分析筆觸中…")
+        self.choose_button.configure(state="disabled")
+        self.save_button.configure(state="disabled")
+        self.undo_button.configure(state="disabled")
+        self.reset_button.configure(state="disabled")
+        self.refine_button.configure(state="disabled", text="智慧邊界分析中…")
         self.process_button.configure(state="disabled")
-        self.status_text.set("正在依照你的標記重新計算完整邊界…")
-        threading.Thread(target=self._refine_worker, daemon=True).start()
+        self.model_status_label.configure(text="正在重新精修", text_color=ACCENT)
+        self.model_progress.configure(mode="indeterminate", progress_color=ACCENT)
+        self.model_progress.start()
+        self.status_text.set("正在依修改後的遮罩重新分析主體邊界…")
+        editor_snapshot = self.editor.clone()
+        threading.Thread(
+            target=self._refine_worker, args=(editor_snapshot,), daemon=True
+        ).start()
 
-    def _refine_worker(self) -> None:
+    def _refine_worker(self, editor: CutoutEditor) -> None:
         try:
-            if self.editor is None:
-                raise RuntimeError("沒有可精修的遮罩。")
-            self.editor.smart_refine()
+            editor.smart_refine()
         except Exception as exc:
-            self.root.after(0, lambda error=exc: self._finish_refining(error))
+            self.root.after(0, lambda error=exc: self._finish_refining(None, error))
         else:
-            self.root.after(0, self._finish_refining, None)
+            self.root.after(0, self._finish_refining, editor, None)
 
-    def _finish_refining(self, error: Exception | None) -> None:
+    def _finish_refining(
+        self, refined_editor: CutoutEditor | None, error: Exception | None
+    ) -> None:
         self.is_processing = False
-        self.refine_button.configure(state="normal", text="✦  再次智慧精修")
+        self.model_progress.stop()
+        self.model_progress.configure(mode="determinate", progress_color=ACCENT)
+        self.model_progress.set(1)
+        self.model_status_label.configure(text="去背引擎已就緒", text_color=ACCENT)
+        self.choose_button.configure(state="normal")
+        self.save_button.configure(state="normal")
+        self.undo_button.configure(state="normal")
+        self.reset_button.configure(state="normal")
+        self.refine_button.configure(state="normal", text="✦  依修改結果重新去背")
         self.process_button.configure(state="normal")
         if error is not None:
             self.status_text.set("智慧精修失敗，請調整標記後再試。")
             messagebox.showerror(APP_TITLE, str(error))
             return
+        if refined_editor is None:
+            return
+        self.editor = refined_editor
         self._draw_preview()
-        self.status_text.set("智慧精修完成。可繼續標記後再次執行。")
+        self.status_text.set("已依修改結果重新分析邊界。可繼續修改後再次執行。")
 
     def save_image(self) -> None:
-        if self.editor is None:
+        if self.is_processing:
+            messagebox.showwarning(APP_TITLE, "圖片仍在處理中，請稍候完成後再儲存。")
+            return
+        if self.editor is None or not self.has_auto_cutout:
             messagebox.showwarning(APP_TITLE, "請先完成自動去背。")
             return
         input_path = Path(self.selected_file.get())
         default_output = build_default_output_path(input_path)
-        selected_path = filedialog.asksaveasfilename(title="儲存透明 PNG", defaultextension=".png", initialfile=default_output.name, initialdir=str(default_output.parent), filetypes=[("PNG Image", "*.png")])
-        if not selected_path:
+        if self.export_dialog is not None and self.export_dialog.winfo_exists():
+            self.export_dialog.focus_force()
             return
+        self.export_dialog = ExportOverlay(self.root, default_output, self._export_image)
+
+    def _export_image(self, output_path: Path) -> str | None:
         try:
-            output_path = Path(selected_path)
             output_path.parent.mkdir(parents=True, exist_ok=True)
             self.editor.render().save(output_path, format="PNG")
         except Exception as exc:
-            messagebox.showerror(APP_TITLE, str(exc))
-            return
+            return f"匯出失敗：{exc}"
         self.status_text.set(f"完成：{output_path}")
-        messagebox.showinfo(APP_TITLE, f"透明 PNG 已儲存：\n{output_path}")
+        return None
 
 
 def run_app() -> None:

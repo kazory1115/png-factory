@@ -2,6 +2,7 @@ from io import BytesIO
 from collections import deque
 import os
 import sys
+import threading
 
 import numpy as np
 from PIL import Image
@@ -24,11 +25,31 @@ if getattr(sys, "frozen", False):
 
 try:
     from rembg import remove as rembg_remove
+    from rembg import new_session as rembg_new_session
 except (ImportError, OSError, SystemExit) as exc:
     rembg_remove = None
+    rembg_new_session = None
     IMPORT_ERROR = exc
 else:
     IMPORT_ERROR = None
+
+
+_MODEL_SESSION = None
+_MODEL_LOCK = threading.Lock()
+
+
+def prepare_model():
+    """Download/load the removal model once and reuse its inference session."""
+    global _MODEL_SESSION
+    if rembg_new_session is None:
+        detail = f"{type(IMPORT_ERROR).__name__}: {IMPORT_ERROR}"
+        raise RuntimeError(f"去背引擎載入失敗。\n\n技術資訊：{detail}") from IMPORT_ERROR
+    if _MODEL_SESSION is not None:
+        return _MODEL_SESSION
+    with _MODEL_LOCK:
+        if _MODEL_SESSION is None:
+            _MODEL_SESSION = rembg_new_session()
+    return _MODEL_SESSION
 
 
 def remove_background(input_bytes: bytes) -> bytes:
@@ -37,11 +58,11 @@ def remove_background(input_bytes: bytes) -> bytes:
         if isinstance(IMPORT_ERROR, ModuleNotFoundError) and IMPORT_ERROR.name:
             detail = f"Missing module {IMPORT_ERROR.name!r}. {detail}"
         raise RuntimeError(
-            "AI 去背元件載入失敗。請下載最新版本後再試。\n\n"
+            "去背引擎元件載入失敗。請下載最新版本後再試。\n\n"
             f"技術資訊：{detail}"
         ) from IMPORT_ERROR
 
-    output_bytes = rembg_remove(input_bytes)
+    output_bytes = rembg_remove(input_bytes, session=prepare_model())
     return refine_cutout(input_bytes, output_bytes)
 
 

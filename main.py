@@ -5,6 +5,11 @@ def main() -> None:
     if "--smoke-test" in sys.argv:
         from app.remover import IMPORT_ERROR, rembg_remove
 
+        try:
+            import cv2  # noqa: F401
+        except (ImportError, OSError) as exc:
+            raise RuntimeError("Smart refine engine failed to load") from exc
+
         if rembg_remove is None:
             raise RuntimeError("AI removal engine failed to load") from IMPORT_ERROR
         if sys.stdout is None or sys.stderr is None:

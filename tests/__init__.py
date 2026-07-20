@@ -1,0 +1,1 @@
+"""PNG Factory automated tests."""
